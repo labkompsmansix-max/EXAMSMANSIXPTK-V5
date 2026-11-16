@@ -4,9 +4,15 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaPlayer
+import android.media.RingtoneManager
+import android.view.KeyEvent
 import android.net.http.SslError
 import android.os.Bundle
 import android.os.Handler
@@ -67,12 +73,111 @@ class MainActivity : AppCompatActivity() {
         get() = prefs.getBoolean("was_pinned", false)
         set(v) { prefs.edit().putBoolean("was_pinned", v).apply() }
 
+    // BARU: pencatatan waktu siswa meninggalkan aplikasi saat ujian berlangsung.
+    // ignorePause dipakai supaya membuka kamera (scan QR) tidak dihitung sebagai keluar.
+    private var ignorePause = false
+    private var leaveDialogShowing = false
+
+    private fun examActive(): Boolean =
+        ::webView.isInitialized && webView.visibility == View.VISIBLE
+
+    private fun resetLeaveStats() {
+        prefs.edit().putLong("left_at", 0L).putInt("leave_count", 0)
+            .putLong("leave_total_ms", 0L).apply()
+    }
+
+    private fun formatDuration(ms: Long): String {
+        val totalSec = ms / 1000
+        val m = totalSec / 60
+        val s = totalSec % 60
+        return if (m > 0) "$m menit $s detik" else "$s detik"
+    }
+
+    // Dipanggil saat siswa kembali ke aplikasi: tampilkan berapa lama mereka pergi.
+    private fun reportLeaveIfAny() {
+        val leftAt = prefs.getLong("left_at", 0L)
+        if (leftAt == 0L) return
+        val dur = System.currentTimeMillis() - leftAt
+        val count = prefs.getInt("leave_count", 0) + 1
+        val total = prefs.getLong("leave_total_ms", 0L) + dur
+        prefs.edit().putLong("left_at", 0L).putInt("leave_count", count)
+            .putLong("leave_total_ms", total).apply()
+
+        if (leaveDialogShowing) return
+        leaveDialogShowing = true
+        AlertDialog.Builder(this)
+            .setTitle("Anda meninggalkan ujian")
+            .setMessage(
+                "Kali ini: ${formatDuration(dur)}\n" +
+                    "Total keluar dari aplikasi: $count kali (${formatDuration(total)})\n\n" +
+                    "Catat dan laporkan kepada pengawas."
+            )
+            .setCancelable(false)
+            .setPositiveButton("Mengerti") { _, _ -> leaveDialogShowing = false }
+            .show()
+    }
+
+    // ---------- BARU: alarm saat sematan dilepas + volume dikunci 100% ----------
+
+    private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
+
+    private fun maxVolume() {
+        try {
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_ALARM,
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0
+            )
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0
+            )
+        } catch (e: Exception) {
+            // Abaikan.
+        }
+    }
+
+    // Alarm dijalankan oleh ExamGuardService (layanan latar depan), sehingga tetap
+    // berbunyi walaupun siswa menekan Home atau keluar dari aplikasi.
+    private var guardStarted = false
+
+    private fun startGuardService() {
+        if (guardStarted) return
+        guardStarted = true
+        try {
+            ContextCompat.startForegroundService(this, Intent(this, ExamGuardService::class.java))
+        } catch (e: Exception) {
+            guardStarted = false
+        }
+    }
+
+    private fun stopGuardService() {
+        guardStarted = false
+        try {
+            stopService(Intent(this, ExamGuardService::class.java))
+        } catch (e: Exception) {
+            // Abaikan.
+        }
+    }
+
+    // Tombol volume tidak bisa dipakai selama ujian atau saat alarm berbunyi.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        val isVolumeKey = keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_UP ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
+        if (isVolumeKey && (examActive() || (wasPinned && !isPinned()))) {
+            maxVolume()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     // Alamat yang boleh dibuka: jaringan lokal (IP privat) dan domain sekolah.
     private val privateIp = Regex(
         """^(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$"""
     )
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
+        ignorePause = false
         val text = result.contents
         if (!text.isNullOrBlank()) openExam(text.trim())
     }
@@ -80,6 +185,7 @@ class MainActivity : AppCompatActivity() {
     private val poll = object : Runnable {
         override fun run() {
             updateLockState()
+            if (examActive()) maxVolume()   // volume dikunci 100% selama ujian
             handler.postDelayed(this, 1000)
         }
     }
@@ -161,13 +267,18 @@ class MainActivity : AppCompatActivity() {
 
         if (isPinned()) {
             if (!wasPinned) wasPinned = true
+            startGuardService()
             lockView.visibility = View.GONE
             return
         }
 
         if (wasPinned) {
+            val beatAge = System.currentTimeMillis() - prefs.getLong("guard_beat", 0L)
+            val diag = if (beatAge > 3000) "LAYANAN ALARM TIDAK BERJALAN"
+                else prefs.getString("guard_status", "-")
             lockMsg.text = "Sematan layar dilepas.\n\n" +
-                "Ujian dikunci. Minta pengawas memasukkan kata sandi untuk melanjutkan."
+                "Ujian dikunci. Minta pengawas memasukkan kata sandi untuk melanjutkan." +
+                "\n\n[Diagnostik v4] Penjaga: $diag"
             lockBtn.text = "Masukkan Kata Sandi Pengawas"
         } else {
             lockMsg.text = "Aplikasi belum disematkan.\n\n" +
@@ -180,6 +291,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        reportLeaveIfAny()
+        if (setupDone && wasPinned) startGuardService()
         if (setupDone) {
             // UBAH: jangan menyematkan otomatis kalau sebelumnya sudah pernah disematkan.
             if (!isPinned() && !wasPinned) tryPin()
@@ -191,6 +304,10 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(poll)
+        // BARU: catat waktu mulai keluar dari aplikasi saat ujian sedang berjalan.
+        if (!ignorePause && examActive() && prefs.getLong("left_at", 0L) == 0L) {
+            prefs.edit().putLong("left_at", System.currentTimeMillis()).apply()
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -309,7 +426,15 @@ class MainActivity : AppCompatActivity() {
         // UBAH: kalau sudah pernah disematkan, tombol meminta kata sandi pengawas
         // dulu, baru menyematkan lagi.
         lockBtn.setOnClickListener {
-            if (wasPinned) askPassword { tryPin() } else tryPin()
+            if (wasPinned) {
+                askPassword {
+                    // Kata sandi benar: alarm dimatikan 20 detik supaya pengawas bisa menyematkan ulang.
+                    prefs.edit().putLong("alarm_mute_until", System.currentTimeMillis() + 20000).apply()
+                    tryPin()
+                }
+            } else {
+                tryPin()
+            }
         }
 
         lockView.addView(lockMsg)
@@ -344,6 +469,7 @@ class MainActivity : AppCompatActivity() {
             .setPrompt("Arahkan kamera ke QR code ujian")
             .setBeepEnabled(false)
             .setOrientationLocked(false)
+        ignorePause = true
         scanLauncher.launch(options)
     }
 
@@ -365,6 +491,7 @@ class MainActivity : AppCompatActivity() {
             toast("Alamat tidak diizinkan: $raw")
             return
         }
+        resetLeaveStats()   // ujian baru dimulai: hitungan keluar dari nol
         homeView.visibility = View.GONE
         webView.visibility = View.VISIBLE
         webView.loadUrl(url)
@@ -412,7 +539,8 @@ class MainActivity : AppCompatActivity() {
         val items = arrayOf(
             "Keluar dari aplikasi",
             "Buka alamat server manual",
-            "Kembali ke halaman awal"
+            "Kembali ke halaman awal",
+            "Tes alarm (4 detik)"
         )
         AlertDialog.Builder(this)
             .setTitle("Menu pengawas")
@@ -421,9 +549,23 @@ class MainActivity : AppCompatActivity() {
                     0 -> exitApp()
                     1 -> askUrl()
                     2 -> showHome()
+                    3 -> testAlarm()
                 }
             }
             .show()
+    }
+
+    // Tes alarm: menjalankan layanan penjaga dan membunyikan alarm 4 detik.
+    private fun testAlarm() {
+        try {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, ExamGuardService::class.java).putExtra("test", true)
+            )
+            toast("Tes alarm dimulai. Dengarkan suara dari HP.")
+        } catch (e: Exception) {
+            toast("Layanan alarm gagal dijalankan: ${e.message}")
+        }
     }
 
     private fun askUrl() {
@@ -442,6 +584,8 @@ class MainActivity : AppCompatActivity() {
         handler.removeCallbacks(poll)
         // BARU: reset status, supaya ujian berikutnya mulai dari awal tanpa meminta kata sandi.
         wasPinned = false
+        stopGuardService()
+        resetLeaveStats()
         try {
             stopLockTask()
         } catch (e: Exception) {
