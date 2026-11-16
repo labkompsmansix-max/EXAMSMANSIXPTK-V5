@@ -10,8 +10,9 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioManager
-import android.media.MediaPlayer
-import android.media.RingtoneManager
+import android.media.AudioFormat
+import android.media.AudioTrack
+import android.widget.Toast
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -27,7 +28,8 @@ import androidx.core.app.NotificationCompat
 class ExamGuardService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
-    private var player: MediaPlayer? = null
+    private var track: AudioTrack? = null
+    private var errorShown = false
 
     private val tick = object : Runnable {
         override fun run() {
@@ -117,34 +119,54 @@ class ExamGuardService : Service() {
         }
     }
 
+    // Sirene dibuat langsung oleh aplikasi (bergantian 900 Hz dan 1500 Hz),
+    // jadi tidak bergantung pada file nada dering di HP.
     private fun startAlarm() {
-        if (player != null) return
+        if (track != null) return
         try {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-            val mp = MediaPlayer()
-            mp.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-            )
-            mp.setDataSource(this, uri)
-            mp.isLooping = true
-            mp.prepare()
+            val sampleRate = 22050
+            val samples = ShortArray(sampleRate)   // 1 detik, diulang terus
+            var phase = 0.0
+            for (i in samples.indices) {
+                val freq = if ((i / (sampleRate / 4)) % 2 == 0) 900.0 else 1500.0
+                phase += 2.0 * Math.PI * freq / sampleRate
+                val v = if (Math.sin(phase) >= 0) 1.0 else -1.0   // gelombang kotak: nyaring
+                samples[i] = (v * 30000).toInt().toShort()
+            }
+            val attrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(sampleRate)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+            val t = AudioTrack.Builder()
+                .setAudioAttributes(attrs)
+                .setAudioFormat(format)
+                .setBufferSizeInBytes(samples.size * 2)
+                .setTransferMode(AudioTrack.MODE_STATIC)
+                .build()
+            t.write(samples, 0, samples.size)
+            t.setLoopPoints(0, samples.size, -1)
             maxVolume()
-            mp.start()
-            player = mp
+            t.play()
+            track = t
         } catch (e: Exception) {
-            player = null
+            track = null
+            if (!errorShown) {   // tampilkan pesan sekali saja, jangan berulang tiap 0,5 detik
+                errorShown = true
+                Toast.makeText(this, "Alarm gagal: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
     private fun stopAlarm() {
-        player?.let {
-            try { if (it.isPlaying) it.stop() } catch (e: Exception) { }
+        track?.let {
+            try { it.stop() } catch (e: Exception) { }
             it.release()
         }
-        player = null
+        track = null
     }
 }
