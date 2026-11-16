@@ -30,6 +30,10 @@ class ExamGuardService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var track: AudioTrack? = null
     private var errorShown = false
+    private var testUntil = 0L
+    private var lastStatus = ""
+    private var lastError = ""
+    private var beatCount = 0
 
     private val tick = object : Runnable {
         override fun run() {
@@ -41,7 +45,15 @@ class ExamGuardService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startAsForeground()
+        if (intent?.getBooleanExtra("test", false) == true) {
+            testUntil = System.currentTimeMillis() + 4000   // tes alarm dari menu pengawas
+        }
+        try {
+            startAsForeground()
+        } catch (e: Exception) {
+            setStatus("startForeground GAGAL: ${e.message}")
+        }
+        setStatus("layanan berjalan")
         handler.removeCallbacks(tick)
         handler.post(tick)
         return START_STICKY
@@ -87,6 +99,20 @@ class ExamGuardService : Service() {
     private fun check() {
         val prefs = getSharedPreferences("exam_state", Context.MODE_PRIVATE)
 
+        // Penanda "layanan hidup", dibaca layar penghalang untuk diagnosis.
+        beatCount++
+        if (beatCount % 4 == 1) {
+            prefs.edit().putLong("guard_beat", System.currentTimeMillis()).apply()
+        }
+
+        // Tes alarm dari menu pengawas: bunyi 4 detik apa pun status sematannya.
+        if (System.currentTimeMillis() < testUntil) {
+            startAlarm()
+            maxVolume()
+            setStatus(if (track != null) "tes alarm: berbunyi" else "tes alarm GAGAL: $lastError")
+            return
+        }
+
         // Ujian sudah diakhiri pengawas (keluar dari aplikasi): layanan berhenti sendiri.
         if (!prefs.getBoolean("was_pinned", false)) {
             stopAlarm()
@@ -94,13 +120,23 @@ class ExamGuardService : Service() {
             return
         }
 
+        val pinned = isPinned()
         val muted = System.currentTimeMillis() < prefs.getLong("alarm_mute_until", 0L)
-        if (isPinned() || muted) {
+        if (pinned || muted) {
             stopAlarm()
+            setStatus(if (pinned) "tersemat (aman)" else "alarm dibisukan sementara")
         } else {
             startAlarm()
             maxVolume()
+            setStatus(if (track != null) "alarm BERBUNYI" else "alarm GAGAL: $lastError")
         }
+    }
+
+    private fun setStatus(s: String) {
+        if (s == lastStatus) return
+        lastStatus = s
+        getSharedPreferences("exam_state", Context.MODE_PRIVATE)
+            .edit().putString("guard_status", s).apply()
     }
 
     // ---------- Alarm dan volume ----------
@@ -155,6 +191,7 @@ class ExamGuardService : Service() {
             track = t
         } catch (e: Exception) {
             track = null
+            lastError = e.message ?: e.javaClass.simpleName
             if (!errorShown) {   // tampilkan pesan sekali saja, jangan berulang tiap 0,5 detik
                 errorShown = true
                 Toast.makeText(this, "Alarm gagal: ${e.message}", Toast.LENGTH_LONG).show()
