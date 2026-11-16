@@ -27,6 +27,12 @@ import androidx.core.app.NotificationCompat
  */
 class ExamGuardService : Service() {
 
+    companion object {
+        // Lewat batas ini sejak terakhir tersemat, sesi ujian dianggap selesai
+        // dan alarm tidak berbunyi lagi. Ubah angka 15 kalau ingin batas lain.
+        const val SESSION_TIMEOUT_MS = 20 * 60 * 1000L
+    }
+
     private val handler = Handler(Looper.getMainLooper())
     private var track: AudioTrack? = null
     private var errorShown = false
@@ -120,11 +126,32 @@ class ExamGuardService : Service() {
             return
         }
 
+        val now = System.currentTimeMillis()
         val pinned = isPinned()
-        val muted = System.currentTimeMillis() < prefs.getLong("alarm_mute_until", 0L)
-        if (pinned || muted) {
+        val muted = now < prefs.getLong("alarm_mute_until", 0L)
+
+        if (pinned) {
+            // Catat kapan terakhir tersemat (tiap 5 detik saja supaya hemat).
+            if (now - prefs.getLong("last_pinned", 0L) > 5000) {
+                prefs.edit().putLong("last_pinned", now).apply()
+            }
             stopAlarm()
-            setStatus(if (pinned) "tersemat (aman)" else "alarm dibisukan sementara")
+            setStatus("tersemat (aman)")
+            return
+        }
+
+        // Sematan lepas lebih lama dari batas waktu: sesi dianggap sudah selesai.
+        if (now - prefs.getLong("last_pinned", 0L) > SESSION_TIMEOUT_MS) {
+            prefs.edit().putBoolean("was_pinned", false).apply()
+            stopAlarm()
+            setStatus("sesi berakhir (lewat batas waktu)")
+            stopSelf()
+            return
+        }
+
+        if (muted) {
+            stopAlarm()
+            setStatus("alarm dibisukan sementara")
         } else {
             startAlarm()
             maxVolume()
