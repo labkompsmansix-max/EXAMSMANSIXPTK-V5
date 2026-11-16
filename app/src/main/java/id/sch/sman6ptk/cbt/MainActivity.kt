@@ -50,12 +50,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var homeView: LinearLayout
     private lateinit var webView: WebView
     private lateinit var lockView: LinearLayout
+    private lateinit var lockMsg: TextView
+    private lateinit var lockBtn: Button
 
     private var setupDone = false
     private var cameraAsked = false
 
     private val matchParent = ViewGroup.LayoutParams.MATCH_PARENT
     private val wrapContent = ViewGroup.LayoutParams.WRAP_CONTENT
+
+    // BARU: menyimpan apakah aplikasi pernah disematkan. Disimpan di penyimpanan
+    // HP supaya tetap berlaku walaupun aplikasi dibuka ulang atau layar diputar.
+    // Setelah pernah disematkan, melepas sematan harus memakai kata sandi pengawas.
+    private val prefs by lazy { getSharedPreferences("exam_state", Context.MODE_PRIVATE) }
+    private var wasPinned: Boolean
+        get() = prefs.getBoolean("was_pinned", false)
+        set(v) { prefs.edit().putBoolean("was_pinned", v).apply() }
 
     // Alamat yang boleh dibuka: jaringan lokal (IP privat) dan domain sekolah.
     private val privateIp = Regex(
@@ -108,7 +118,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         setupDone = true
-        if (!isPinned()) tryPin()
+        // UBAH: menyematkan otomatis hanya jika belum pernah disematkan.
+        // Kalau sudah pernah, siswa harus memasukkan kata sandi pengawas dulu.
+        if (!isPinned() && !wasPinned) tryPin()
         handler.removeCallbacks(poll)
         handler.post(poll)
     }
@@ -141,15 +153,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // UBAH: kalau sematan lepas setelah pernah disematkan, layar penghalang
+    // meminta kata sandi pengawas. Kalau belum pernah disematkan, tampilannya
+    // sama seperti sebelumnya (tombol "Sematkan Aplikasi").
     private fun updateLockState() {
         if (!setupDone) return
-        lockView.visibility = if (isPinned()) View.GONE else View.VISIBLE
+
+        if (isPinned()) {
+            if (!wasPinned) wasPinned = true
+            lockView.visibility = View.GONE
+            return
+        }
+
+        if (wasPinned) {
+            lockMsg.text = "Sematan layar dilepas.\n\n" +
+                "Ujian dikunci. Minta pengawas memasukkan kata sandi untuk melanjutkan."
+            lockBtn.text = "Masukkan Kata Sandi Pengawas"
+        } else {
+            lockMsg.text = "Aplikasi belum disematkan.\n\n" +
+                "Tekan tombol di bawah, lalu pilih \"Mengerti\" (atau \"Mulai\") " +
+                "pada kotak yang muncul. Ujian tidak dapat dimulai sebelum aplikasi disematkan."
+            lockBtn.text = "Sematkan Aplikasi"
+        }
+        lockView.visibility = View.VISIBLE
     }
 
     override fun onResume() {
         super.onResume()
         if (setupDone) {
-            if (!isPinned()) tryPin()
+            // UBAH: jangan menyematkan otomatis kalau sebelumnya sudah pernah disematkan.
+            if (!isPinned() && !wasPinned) tryPin()
             handler.removeCallbacks(poll)
             handler.post(poll)
         }
@@ -266,21 +299,21 @@ class MainActivity : AppCompatActivity() {
         lockView.visibility = View.GONE
         lockView.isClickable = true
 
-        val msg = TextView(this)
-        msg.text = "Aplikasi belum disematkan.\n\n" +
-            "Tekan tombol di bawah, lalu pilih \"Mengerti\" (atau \"Mulai\") " +
-            "pada kotak yang muncul. Ujian tidak dapat dimulai sebelum aplikasi disematkan."
-        msg.textSize = 18f
-        msg.setTextColor(Color.WHITE)
-        msg.gravity = Gravity.CENTER
-        msg.setPadding(0, 0, 0, dp(24))
+        lockMsg = TextView(this)
+        lockMsg.textSize = 18f
+        lockMsg.setTextColor(Color.WHITE)
+        lockMsg.gravity = Gravity.CENTER
+        lockMsg.setPadding(0, 0, 0, dp(24))
 
-        val btn = Button(this)
-        btn.text = "Sematkan Aplikasi"
-        btn.setOnClickListener { tryPin() }
+        lockBtn = Button(this)
+        // UBAH: kalau sudah pernah disematkan, tombol meminta kata sandi pengawas
+        // dulu, baru menyematkan lagi.
+        lockBtn.setOnClickListener {
+            if (wasPinned) askPassword { tryPin() } else tryPin()
+        }
 
-        lockView.addView(msg)
-        lockView.addView(btn)
+        lockView.addView(lockMsg)
+        lockView.addView(lockBtn)
         root.addView(lockView, FrameLayout.LayoutParams(matchParent, matchParent))
     }
 
@@ -407,6 +440,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun exitApp() {
         handler.removeCallbacks(poll)
+        // BARU: reset status, supaya ujian berikutnya mulai dari awal tanpa meminta kata sandi.
+        wasPinned = false
         try {
             stopLockTask()
         } catch (e: Exception) {
