@@ -17,6 +17,7 @@ import android.net.http.SslError
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -171,6 +172,21 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    // BARU: sesi ujian dianggap selesai kalau HP sudah lebih dari 15 menit tidak tersemat
+    // (misalnya siswa sudah selesai, restart HP, lalu membukanya lagi 30 menit atau besok).
+    // Kalau belum lewat 15 menit, status ujian dipertahankan sehingga alarm tetap berbunyi.
+    // Batasnya diatur di ExamGuardService.SESSION_TIMEOUT_MS.
+    private fun expireOldSession() {
+        if (!wasPinned) return
+        val last = prefs.getLong("last_pinned", 0L)
+        if (System.currentTimeMillis() - last > ExamGuardService.SESSION_TIMEOUT_MS) {
+            wasPinned = false
+            resetLeaveStats()
+            prefs.edit().putLong("alarm_mute_until", 0L).apply()
+            stopGuardService()
+        }
+    }
+
     // Alamat yang boleh dibuka: jaringan lokal (IP privat) dan domain sekolah.
     private val privateIp = Regex(
         """^(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$"""
@@ -211,6 +227,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
+        expireOldSession()
         ensureSetup()
     }
 
@@ -267,6 +284,10 @@ class MainActivity : AppCompatActivity() {
 
         if (isPinned()) {
             if (!wasPinned) wasPinned = true
+            val now = System.currentTimeMillis()
+            if (now - prefs.getLong("last_pinned", 0L) > 5000) {
+                prefs.edit().putLong("last_pinned", now).apply()
+            }
             startGuardService()
             lockView.visibility = View.GONE
             return
@@ -292,6 +313,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         reportLeaveIfAny()
+        expireOldSession()
         if (setupDone && wasPinned) startGuardService()
         if (setupDone) {
             // UBAH: jangan menyematkan otomatis kalau sebelumnya sudah pernah disematkan.
