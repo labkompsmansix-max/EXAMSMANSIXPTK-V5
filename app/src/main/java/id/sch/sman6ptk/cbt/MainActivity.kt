@@ -52,6 +52,11 @@ import javax.crypto.spec.PBEKeySpec
 
 class MainActivity : AppCompatActivity() {
 
+    // Kata kunci aplikasi. HARUS SAMA PERSIS dengan yang ada di file .htaccess di server.
+    // Ganti dengan kata kunci buatan Anda sendiri (huruf/angka saja, tanpa spasi),
+    // dan ganti setiap beberapa ujian supaya kata kunci lama yang bocor tidak berguna.
+    private val APP_KEY = "SMANSIX-66F64F8CE3B53006"
+
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var root: FrameLayout
     private lateinit var homeView: LinearLayout
@@ -395,6 +400,9 @@ class MainActivity : AppCompatActivity() {
         s.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         s.allowFileAccess = false
         s.allowContentAccess = false
+        // BARU: tanda pengenal rahasia di setiap permintaan ke server CBT.
+        // Server (.htaccess) hanya menerima permintaan yang membawa kata kunci ini.
+        s.userAgentString = s.userAgentString + " " + APP_KEY
 
         webView.webChromeClient = WebChromeClient()
         webView.webViewClient = object : WebViewClient() {
