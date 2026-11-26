@@ -246,9 +246,9 @@ class MainActivity : AppCompatActivity() {
             return
         }
         setupDone = true
-        // UBAH: menyematkan otomatis hanya jika belum pernah disematkan.
-        // Kalau sudah pernah, siswa harus memasukkan kata sandi pengawas dulu.
-        if (!isPinned() && !wasPinned) tryPin()
+        // UBAH: aplikasi TIDAK disematkan di awal. Penyematan baru dilakukan setelah
+        // halaman login CBT berhasil terbuka (lihat onPageFinished), supaya pengawas
+        // sempat memastikan siswa sudah tersambung ke WiFi yang benar.
         handler.removeCallbacks(poll)
         handler.post(poll)
     }
@@ -287,6 +287,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateLockState() {
         if (!setupDone) return
 
+        // BARU: selama ujian belum dimulai (masih di layar awal), tidak ada penguncian.
+        if (!examActive() && !isPinned()) {
+            lockView.visibility = View.GONE
+            return
+        }
+
         if (isPinned()) {
             if (!wasPinned) wasPinned = true
             val now = System.currentTimeMillis()
@@ -322,7 +328,7 @@ class MainActivity : AppCompatActivity() {
         if (setupDone && wasPinned) startGuardService()
         if (setupDone) {
             // UBAH: jangan menyematkan otomatis kalau sebelumnya sudah pernah disematkan.
-            if (!isPinned() && !wasPinned) tryPin()
+            if (examActive() && !isPinned() && !wasPinned) tryPin()
             handler.removeCallbacks(poll)
             handler.post(poll)
         }
@@ -368,7 +374,8 @@ class MainActivity : AppCompatActivity() {
         title.gravity = Gravity.CENTER
 
         val sub = TextView(this)
-        sub.text = "Scan QR code yang diberikan pengawas untuk memulai ujian."
+        sub.text = "Scan QR code yang diberikan pengawas untuk memulai ujian. " +
+            "Kalau kamera tidak bisa dipakai, pilih kelas Anda."
         sub.textSize = 16f
         sub.setTextColor(Color.DKGRAY)
         sub.gravity = Gravity.CENTER
@@ -387,6 +394,15 @@ class MainActivity : AppCompatActivity() {
         homeView.addView(title)
         homeView.addView(sub)
         homeView.addView(scan)
+
+        // BARU: siswa bisa mengetik alamat server sendiri (untuk HP yang kameranya rusak).
+        // Alamat tetap dibatasi oleh isAllowed(): hanya domain sekolah dan IP jaringan lokal.
+        val manual = Button(this)
+        manual.text = "Pilih Kelas (tanpa scan QR)"
+        manual.setOnClickListener { showClassPicker() }
+        val manualLp = LinearLayout.LayoutParams(wrapContent, wrapContent)
+        manualLp.topMargin = dp(12)
+        homeView.addView(manual, manualLp)
         root.addView(homeView, FrameLayout.LayoutParams(matchParent, matchParent))
     }
 
@@ -413,6 +429,16 @@ class MainActivity : AppCompatActivity() {
                 if (isAllowed(request.url)) return false
                 toast("Alamat ini tidak diizinkan.")
                 return true
+            }
+
+            // BARU: begitu halaman CBT berhasil terbuka, aplikasi disematkan.
+            // Kalau gagal terbuka (misalnya salah WiFi), onReceivedError membawa siswa
+            // kembali ke layar awal dan penyematan tidak dilakukan.
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                if (examActive() && url != "about:blank" && !isPinned() && !wasPinned) {
+                    tryPin()
+                }
             }
 
             override fun onReceivedError(
@@ -598,12 +624,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // BARU: daftar kelas dan server-nya. Untuk mengubah atau menambah, cukup edit daftar ini:
+    // satu baris untuk satu kelas, dengan format  "NAMA KELAS" to "alamat/folder"
+    private val classServers = listOf(
+        "10ABCD" to "192.168.0.101/smansixcbt",
+        "10EFGH" to "192.168.0.102/smansixcbt",
+        "11ABCD" to "192.168.0.111/smansixcbt",
+        "11EFGH" to "192.168.0.112/smansixcbt",
+        "12ABCD" to "192.168.0.121/smansixcbt",
+        "12EFGH" to "192.168.0.122/smansixcbt"
+    )
+
+    private fun showClassPicker() {
+        // Hanya nama kelas yang tampil; alamat server tidak terlihat oleh siswa.
+        val labels = classServers.map { it.first }.toMutableList()
+        labels.add("Ketik alamat lain...")
+        AlertDialog.Builder(this)
+            .setTitle("Pilih kelas Anda")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (which < classServers.size) openExam(classServers[which].second) else askUrl()
+            }
+            .setNegativeButton("Batal", null)
+            .show()
+    }
+
     private fun askUrl() {
         val input = EditText(this)
         input.hint = "192.168.0.101/smansixcbt"
         input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         AlertDialog.Builder(this)
             .setTitle("Alamat server")
+            .setMessage("Ketik alamat server ujian sesuai yang diberikan pengawas.")
             .setView(input)
             .setPositiveButton("Buka") { _, _ -> openExam(input.text.toString().trim()) }
             .setNegativeButton("Batal", null)
